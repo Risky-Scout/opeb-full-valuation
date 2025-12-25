@@ -11,7 +11,7 @@ Production-ready GASB 75 OPEB valuation engine with scientific precision that ex
 
 ---
 
-## 🎯 Shackleford Precision Enhancements
+## 🎯 Shackelford Precision Enhancements
 
 This engine implements four critical mathematical improvements over standard actuarial models:
 
