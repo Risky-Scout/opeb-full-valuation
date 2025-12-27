@@ -6,24 +6,34 @@ GASB 75 OPEB Disclosure Excel File Updater
 This module contains the correct logic for updating a GASB 75 disclosure file
 from one measurement period to the next.
 
-The update process is CRITICAL and must follow this exact sequence:
+CRITICAL UPDATE SEQUENCE:
 1. Hardcode RSI current year column (preserve prior year data)
-2. Set RSI new year column formulas
+2. Set RSI new year column formulas  
 3. Shift ARSL values in AmortDeferredOutsIns (ALL values shift down)
 4. Update AmortDeferredOutsIns A13 (current year)
 5. Update Assumptions tab (dates and rates)
 6. Update ProVal1 (valuation results)
 7. Update Net OPEB labels
 
-This works for both roll-forward and full valuations - only the ProVal1
-values differ.
+KEY INSIGHTS:
+- ARSL values are tied to YEARS, not ROWS. When years shift down, ARSL must follow.
+- RSI current year column has formulas to Net OPEB. Must hardcode before updating.
+- Interest is calculated at PRIOR discount rate (Assumptions C11).
+- Experience is a RESIDUAL in Net OPEB D22.
+- Service cost comes from ProVal1 B38 (not D38).
+
+This works for both roll-forward and full valuations - only the ProVal1 values differ.
 """
 
 from openpyxl import load_workbook
 from datetime import date
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
 
+
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
 
 @dataclass
 class GASB75UpdateInputs:
@@ -49,210 +59,89 @@ class GASB75UpdateInputs:
     
     # ProVal1 values - Other
     service_cost: float         # B38 - Service cost for the year
-    covered_payroll: float      # D17 - Covered payroll (optional update)
+    covered_payroll: float      # D17 - Covered payroll
     active_count: Optional[int] = None   # D6
     retiree_count: Optional[int] = None  # D8
 
 
-def update_gasb75_file(
-    input_file: str,
-    output_file: str,
-    inputs: GASB75UpdateInputs,
-    new_arsl: Optional[float] = None
-) -> Dict[str, Any]:
+@dataclass 
+class PriorYearExtract:
+    """Data extracted from prior year GASB 75 file."""
+    measurement_date: Optional[date] = None
+    tol_eoy: float = 0.0
+    service_cost: float = 0.0  # From B38
+    discount_rate: float = 0.0
+    arsl: float = 5.0
+    active_count: int = 0
+    retiree_count: int = 0
+    covered_payroll: float = 0.0
+    # Current ARSL values (will be shifted during update)
+    arsl_c13: Optional[float] = None
+    arsl_c14: Optional[float] = None
+    arsl_c15: Optional[float] = None
+    arsl_c16: Optional[float] = None
+    arsl_c17: Optional[float] = None
+    arsl_c18: Optional[float] = None
+
+
+# =============================================================================
+# EXTRACTION
+# =============================================================================
+
+def extract_prior_year_data(prior_file: str) -> PriorYearExtract:
     """
-    Update a GASB 75 disclosure file from one measurement period to the next.
+    Extract all required data from prior year GASB 75 file.
     
     Args:
-        input_file: Path to the current year's GASB 75 file
-        output_file: Path for the updated file
-        inputs: GASB75UpdateInputs with all required values
-        new_arsl: New ARSL for current year (if None, formula will calculate)
-    
+        prior_file: Path to the prior year GASB 75 Excel file
+        
     Returns:
-        Dict with summary of changes made
+        PriorYearExtract with all extracted data
     """
+    wb = load_workbook(prior_file, data_only=True)
+    data = PriorYearExtract()
     
-    # Load workbooks - one for formulas, one for values
-    wb = load_workbook(input_file)
-    wb_data = load_workbook(input_file, data_only=True)
-    
-    summary = {
-        'prior_year': None,
-        'new_year': None,
-        'rsi_hardcoded': {},
-        'arsl_shifted': {},
-        'proval_updated': {},
-    }
-    
-    # ==========================================================================
-    # STEP 1: HARDCODE RSI CURRENT YEAR COLUMN
-    # ==========================================================================
-    rsi = wb['RSI']
-    rsi_data = wb_data['RSI']
-    
-    # Determine current year column (H for 2024, I for 2025, etc.)
-    # The current year is in Assumptions C4
-    assumptions_data = wb_data['Assumptions']
-    current_measurement_date = assumptions_data['C4'].value
-    if hasattr(current_measurement_date, 'year'):
-        current_year = current_measurement_date.year
-    else:
-        current_year = int(current_measurement_date) if current_measurement_date else 2024
-    
-    summary['prior_year'] = current_year
-    summary['new_year'] = inputs.measurement_date.year
-    
-    # Map year to column: 2018=B, 2019=C, 2020=D, 2021=E, 2022=F, 2023=G, 2024=H, 2025=I
-    year_to_col = {2018: 'B', 2019: 'C', 2020: 'D', 2021: 'E', 2022: 'F', 2023: 'G', 2024: 'H', 2025: 'I', 2026: 'J', 2027: 'K'}
-    current_col = year_to_col.get(current_year, 'H')
-    new_col = year_to_col.get(inputs.measurement_date.year, 'I')
-    
-    # Rows to hardcode in RSI
-    rsi_rows = {
-        3: 'Year',
-        4: 'Service Cost',
-        5: 'Interest',
-        6: 'Benefit Changes',
-        7: 'Experience',
-        8: 'Assumptions',
-        9: 'Benefit Payments',
-        10: 'Net Change',
-        12: 'BOY TOL',
-        14: 'EOY TOL',
-        17: 'Covered Payroll',
-        20: 'TOL % of Payroll',
-        26: 'Discount Rate',
-    }
-    
-    # Hardcode current column values
-    for row, label in rsi_rows.items():
-        cell_ref = f'{current_col}{row}'
-        current_value = rsi_data[cell_ref].value
-        rsi[cell_ref] = current_value
-        summary['rsi_hardcoded'][f'{cell_ref} ({label})'] = current_value
-    
-    # ==========================================================================
-    # STEP 2: SET RSI NEW YEAR COLUMN FORMULAS
-    # ==========================================================================
-    rsi[f'{new_col}3'] = f"=YEAR(Assumptions!C4)"
-    rsi[f'{new_col}4'] = f"='Net OPEB'!D14"
-    rsi[f'{new_col}5'] = f"='Net OPEB'!D16"
-    rsi[f'{new_col}6'] = f"='Net OPEB'!D20"
-    rsi[f'{new_col}7'] = f"='Net OPEB'!D22"
-    rsi[f'{new_col}8'] = f"='Net OPEB'!D18"
-    rsi[f'{new_col}9'] = f"='Net OPEB'!D24"
-    rsi[f'{new_col}10'] = f"='Net OPEB'!D27"
-    rsi[f'{new_col}12'] = f"='Net OPEB'!D12"
-    rsi[f'{new_col}14'] = f"='Net OPEB'!D29"
-    rsi[f'{new_col}17'] = inputs.covered_payroll  # Hardcode or use formula
-    rsi[f'{new_col}20'] = f"={new_col}14/{new_col}17"
-    rsi[f'{new_col}26'] = f"=AmortDeferredOutsIns!C6"
-    rsi[f'{new_col}27'] = "Pub-2010/2021"
-    rsi[f'{new_col}28'] = "Getzen model"
-    
-    # ==========================================================================
-    # STEP 3: SHIFT ARSL VALUES IN AmortDeferredOutsIns
-    # ==========================================================================
-    amort = wb['AmortDeferredOutsIns']
-    amort_data = wb_data['AmortDeferredOutsIns']
-    
-    # Capture current ARSL values BEFORE shifting
-    c13_val = amort_data['C13'].value  # Current year ARSL
-    c14_val = amort_data['C14'].value  # Prior year 1
-    c15_val = amort_data['C15'].value  # Prior year 2
-    c16_val = amort_data['C16'].value  # Prior year 3
-    c17_val = amort_data['C17'].value  # Prior year 4
-    c18_val = amort_data['C18'].value  # Prior year 5
-    # c19 falls off
-    
-    # Shift ALL values down by one row
-    amort['C14'] = c13_val  # Current year's ARSL moves to row 14
-    amort['C15'] = c14_val  # Prior year 1 moves to row 15
-    amort['C16'] = c15_val  # Prior year 2 moves to row 16
-    amort['C17'] = c16_val  # Prior year 3 moves to row 17
-    amort['C18'] = c17_val  # Prior year 4 moves to row 18
-    amort['C19'] = c18_val  # Prior year 5 moves to row 19
-    # C13 keeps its formula - will calculate new year's ARSL
-    
-    summary['arsl_shifted'] = {
-        'C14 (was C13)': c13_val,
-        'C15 (was C14)': c14_val,
-        'C16 (was C15)': c15_val,
-        'C17 (was C16)': c16_val,
-        'C18 (was C17)': c17_val,
-        'C19 (was C18)': c18_val,
-    }
-    
-    # ==========================================================================
-    # STEP 4: UPDATE AmortDeferredOutsIns A13 (current year)
-    # ==========================================================================
-    amort['A13'] = inputs.measurement_date.year
-    
-    # ==========================================================================
-    # STEP 5: UPDATE ASSUMPTIONS TAB
-    # ==========================================================================
+    # Assumptions - Get measurement date
     assumptions = wb['Assumptions']
-    assumptions['C2'] = inputs.valuation_date
-    assumptions['C3'] = inputs.prior_measurement_date
-    assumptions['C4'] = inputs.measurement_date
-    assumptions['C11'] = inputs.prior_discount_rate
-    assumptions['C12'] = f"{inputs.new_discount_rate*100:.2f}% annually which is the Bond Buyer 20-Bond General Obligation Index on the Measurement Date.  The 20-Bond Index consists of 20 general obligation bonds that mature in 20 years."
+    measurement_date = assumptions['C4'].value
+    if hasattr(measurement_date, 'date'):
+        data.measurement_date = measurement_date.date()
+    elif hasattr(measurement_date, 'year'):
+        data.measurement_date = measurement_date
     
-    # ==========================================================================
-    # STEP 6: UPDATE PROVAL1
-    # ==========================================================================
+    # ProVal1 - Key values
     proval = wb['ProVal1']
+    data.tol_eoy = proval['D19'].value or 0
+    data.service_cost = proval['B38'].value or 0  # B38 is what Net OPEB D14 uses!
+    data.active_count = proval['D6'].value or 0
+    data.retiree_count = proval['D8'].value or 0
+    data.covered_payroll = proval['D17'].value or 0
+    data.discount_rate = proval['D88'].value or 0
+    data.arsl = proval['D74'].value or 5.0
     
-    proval['B19'] = inputs.tol_boy_old_rate
-    proval['C19'] = inputs.tol_boy_new_rate
-    proval['D19'] = inputs.tol_eoy_baseline
-    proval['E19'] = inputs.tol_eoy_disc_plus_1
-    proval['F19'] = inputs.tol_eoy_disc_minus_1
-    proval['G19'] = inputs.tol_eoy_trend_baseline
-    proval['H19'] = inputs.tol_eoy_trend_plus_1
-    proval['I19'] = inputs.tol_eoy_trend_minus_1
-    proval['B38'] = inputs.service_cost
-    proval['D88'] = inputs.new_discount_rate
+    # AmortDeferredOutsIns - Get ARSL values for shifting
+    amort = wb['AmortDeferredOutsIns']
+    data.arsl_c13 = amort['C13'].value
+    data.arsl_c14 = amort['C14'].value
+    data.arsl_c15 = amort['C15'].value
+    data.arsl_c16 = amort['C16'].value
+    data.arsl_c17 = amort['C17'].value
+    data.arsl_c18 = amort['C18'].value
     
-    if inputs.active_count is not None:
-        proval['D6'] = inputs.active_count
-    if inputs.retiree_count is not None:
-        proval['D8'] = inputs.retiree_count
-    if inputs.covered_payroll:
-        proval['D17'] = inputs.covered_payroll
-    
-    summary['proval_updated'] = {
-        'B19 (BOY old rate)': inputs.tol_boy_old_rate,
-        'C19 (BOY new rate)': inputs.tol_boy_new_rate,
-        'D19 (EOY)': inputs.tol_eoy_baseline,
-        'B38 (Service Cost)': inputs.service_cost,
-        'D88 (Discount Rate)': inputs.new_discount_rate,
-    }
-    
-    # ==========================================================================
-    # STEP 7: UPDATE NET OPEB LABELS
-    # ==========================================================================
-    net_opeb = wb['Net OPEB']
-    net_opeb['A9'] = f"Table 3: Changes in Net OPEB Liability for the plan's fiscal year ending {inputs.measurement_date.month}/{inputs.measurement_date.day}/{inputs.measurement_date.year}"
-    net_opeb['A12'] = f"Balances at {inputs.prior_measurement_date.month}/{inputs.prior_measurement_date.day}/{inputs.prior_measurement_date.year}"
-    net_opeb['A29'] = f"Balances at {inputs.measurement_date.month}/{inputs.measurement_date.day}/{inputs.measurement_date.year}"
-    
-    # ==========================================================================
-    # SAVE
-    # ==========================================================================
-    wb.save(output_file)
     wb.close()
-    wb_data.close()
-    
-    return summary
+    return data
 
 
-def run_rollforward_calculation(
+# =============================================================================
+# ROLL-FORWARD CALCULATION
+# =============================================================================
+
+def calculate_rollforward(
     prior_tol_eoy: float,
     prior_service_cost: float,
     prior_discount_rate: float,
     new_discount_rate: float,
+    benefit_payments: float = 0.0,
     duration: float = 10.0
 ) -> Dict[str, float]:
     """
@@ -260,11 +149,20 @@ def run_rollforward_calculation(
     
     For a roll-forward, we project the liability forward assuming:
     - Service cost same as prior year
-    - Interest at prior discount rate
+    - Interest at prior discount rate (BOY rate)
     - Assumption change from discount rate change
     - Experience = 0 (no actual data)
     
-    Returns dict with all calculated values.
+    Args:
+        prior_tol_eoy: Prior year's ending TOL (becomes BOY)
+        prior_service_cost: Prior year's service cost (from B38)
+        prior_discount_rate: Rate at BOY (for interest calculation)
+        new_discount_rate: Rate at EOY
+        benefit_payments: Benefits paid during year
+        duration: Approximate duration for assumption change calc
+    
+    Returns:
+        Dict with all calculated values
     """
     tol_boy = prior_tol_eoy
     service_cost = prior_service_cost
@@ -274,15 +172,18 @@ def run_rollforward_calculation(
     
     # Assumption change from rate change
     rate_change = new_discount_rate - prior_discount_rate
-    assumption_change = -tol_boy * rate_change * duration
+    assumption_change = -tol_boy * rate_change * duration if abs(rate_change) > 0.0001 else 0
     
-    # BOY at new rate (for D18 formula)
+    # BOY at new rate (for Excel D18 formula: C19 - D12)
     tol_boy_new_rate = tol_boy + assumption_change
     
-    # EOY = BOY + SC + Interest + Assumption + Experience(0) - Benefits(0)
-    tol_eoy = tol_boy + service_cost + interest + assumption_change
+    # Experience = 0 for roll-forward
+    experience = 0.0
     
-    # Sensitivities (rough approximations)
+    # EOY = BOY + SC + Interest + Assumption + Experience - Benefits
+    tol_eoy = tol_boy + service_cost + interest + assumption_change + experience - benefit_payments
+    
+    # Sensitivities (approximate)
     tol_eoy_disc_plus_1 = tol_eoy * 0.92
     tol_eoy_disc_minus_1 = tol_eoy * 1.08
     tol_eoy_trend_plus_1 = tol_eoy * 1.04
@@ -300,46 +201,244 @@ def run_rollforward_calculation(
         'service_cost': service_cost,
         'interest': interest,
         'assumption_change': assumption_change,
-        'experience': 0.0,
+        'experience': experience,
     }
 
 
 # =============================================================================
-# EXAMPLE USAGE
+# FILE UPDATE
 # =============================================================================
 
-if __name__ == '__main__':
-    # Example: Update West Florida Planning from 2024 to 2025
+def update_gasb75_file(
+    input_file: str,
+    output_file: str,
+    inputs: GASB75UpdateInputs,
+) -> Dict[str, Any]:
+    """
+    Update a GASB 75 disclosure file from one measurement period to the next.
     
-    # Prior year values (from 2024 file)
-    prior_tol_eoy = 24010
-    prior_service_cost = 215
-    prior_discount_rate = 0.0381
-    new_discount_rate = 0.0502
+    CRITICAL: Follows the exact update sequence:
+    1. Hardcode RSI current year column
+    2. Set RSI new year column formulas
+    3. Shift ARSL values (ALL values shift down)
+    4. Update A13
+    5. Update Assumptions
+    6. Update ProVal1
+    7. Update Net OPEB labels
     
-    # Calculate roll-forward values
-    calc = run_rollforward_calculation(
-        prior_tol_eoy=prior_tol_eoy,
-        prior_service_cost=prior_service_cost,
-        prior_discount_rate=prior_discount_rate,
+    Args:
+        input_file: Path to the current (prior year) GASB 75 file
+        output_file: Path for the updated file
+        inputs: GASB75UpdateInputs with all required values
+    
+    Returns:
+        Dict with summary of changes made
+    """
+    # Load workbooks
+    wb = load_workbook(input_file)
+    wb_data = load_workbook(input_file, data_only=True)
+    
+    summary = {'steps_completed': []}
+    
+    # Determine years
+    assumptions_data = wb_data['Assumptions']
+    current_measurement_date = assumptions_data['C4'].value
+    if hasattr(current_measurement_date, 'year'):
+        prior_year = current_measurement_date.year
+    else:
+        prior_year = inputs.measurement_date.year - 1
+    
+    new_year = inputs.measurement_date.year
+    
+    summary['prior_year'] = prior_year
+    summary['new_year'] = new_year
+    
+    # Map year to RSI column
+    def year_to_col(year):
+        return chr(ord('B') + year - 2018)
+    
+    current_col = year_to_col(prior_year)
+    new_col = year_to_col(new_year)
+    
+    # =========================================================================
+    # STEP 1: HARDCODE RSI CURRENT YEAR COLUMN
+    # =========================================================================
+    rsi = wb['RSI']
+    rsi_data = wb_data['RSI']
+    
+    rsi_rows = [3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 17, 20, 26]
+    hardcoded_values = {}
+    for row in rsi_rows:
+        cell_ref = f'{current_col}{row}'
+        current_value = rsi_data[cell_ref].value
+        rsi[cell_ref] = current_value
+        hardcoded_values[cell_ref] = current_value
+    
+    summary['steps_completed'].append('RSI hardcoded')
+    summary['rsi_hardcoded'] = hardcoded_values
+    
+    # =========================================================================
+    # STEP 2: SET RSI NEW YEAR COLUMN FORMULAS
+    # =========================================================================
+    rsi[f'{new_col}3'] = "=YEAR(Assumptions!C4)"
+    rsi[f'{new_col}4'] = "='Net OPEB'!D14"
+    rsi[f'{new_col}5'] = "='Net OPEB'!D16"
+    rsi[f'{new_col}6'] = "='Net OPEB'!D20"
+    rsi[f'{new_col}7'] = "='Net OPEB'!D22"
+    rsi[f'{new_col}8'] = "='Net OPEB'!D18"
+    rsi[f'{new_col}9'] = "='Net OPEB'!D24"
+    rsi[f'{new_col}10'] = "='Net OPEB'!D27"
+    rsi[f'{new_col}12'] = "='Net OPEB'!D12"
+    rsi[f'{new_col}14'] = "='Net OPEB'!D29"
+    rsi[f'{new_col}17'] = inputs.covered_payroll
+    rsi[f'{new_col}20'] = f"={new_col}14/{new_col}17"
+    rsi[f'{new_col}26'] = "=AmortDeferredOutsIns!C6"
+    rsi[f'{new_col}27'] = "Pub-2010/2021"
+    rsi[f'{new_col}28'] = "Getzen model"
+    
+    summary['steps_completed'].append('RSI formulas set')
+    summary['rsi_new_column'] = new_col
+    
+    # =========================================================================
+    # STEP 3: SHIFT ARSL VALUES
+    # =========================================================================
+    amort = wb['AmortDeferredOutsIns']
+    amort_data = wb_data['AmortDeferredOutsIns']
+    
+    # Capture current values
+    c13_val = amort_data['C13'].value
+    c14_val = amort_data['C14'].value
+    c15_val = amort_data['C15'].value
+    c16_val = amort_data['C16'].value
+    c17_val = amort_data['C17'].value
+    c18_val = amort_data['C18'].value
+    
+    # Shift down
+    amort['C14'] = c13_val
+    amort['C15'] = c14_val
+    amort['C16'] = c15_val
+    amort['C17'] = c16_val
+    amort['C18'] = c17_val
+    amort['C19'] = c18_val
+    
+    summary['steps_completed'].append('ARSL shifted')
+    summary['arsl_shifted'] = {
+        'C14': c13_val, 'C15': c14_val, 'C16': c15_val,
+        'C17': c16_val, 'C18': c17_val, 'C19': c18_val
+    }
+    
+    # =========================================================================
+    # STEP 4: UPDATE A13
+    # =========================================================================
+    amort['A13'] = new_year
+    summary['steps_completed'].append('A13 updated')
+    
+    # =========================================================================
+    # STEP 5: UPDATE ASSUMPTIONS
+    # =========================================================================
+    assumptions = wb['Assumptions']
+    assumptions['C2'] = inputs.valuation_date
+    assumptions['C3'] = inputs.prior_measurement_date
+    assumptions['C4'] = inputs.measurement_date
+    assumptions['C11'] = inputs.prior_discount_rate
+    assumptions['C12'] = f"{inputs.new_discount_rate*100:.2f}% annually which is the Bond Buyer 20-Bond General Obligation Index on the Measurement Date.  The 20-Bond Index consists of 20 general obligation bonds that mature in 20 years."
+    
+    summary['steps_completed'].append('Assumptions updated')
+    
+    # =========================================================================
+    # STEP 6: UPDATE PROVAL1
+    # =========================================================================
+    proval = wb['ProVal1']
+    proval['B19'] = inputs.tol_boy_old_rate
+    proval['C19'] = inputs.tol_boy_new_rate
+    proval['D19'] = inputs.tol_eoy_baseline
+    proval['E19'] = inputs.tol_eoy_disc_plus_1
+    proval['F19'] = inputs.tol_eoy_disc_minus_1
+    proval['G19'] = inputs.tol_eoy_trend_baseline
+    proval['H19'] = inputs.tol_eoy_trend_plus_1
+    proval['I19'] = inputs.tol_eoy_trend_minus_1
+    proval['B38'] = inputs.service_cost
+    proval['D17'] = inputs.covered_payroll
+    proval['D88'] = inputs.new_discount_rate
+    
+    if inputs.active_count is not None:
+        proval['D6'] = inputs.active_count
+    if inputs.retiree_count is not None:
+        proval['D8'] = inputs.retiree_count
+    
+    summary['steps_completed'].append('ProVal1 updated')
+    
+    # =========================================================================
+    # STEP 7: UPDATE NET OPEB LABELS
+    # =========================================================================
+    net_opeb = wb['Net OPEB']
+    md = inputs.measurement_date
+    pmd = inputs.prior_measurement_date
+    net_opeb['A9'] = f"Table 3: Changes in Net OPEB Liability for the plan's fiscal year ending {md.month}/{md.day}/{md.year}"
+    net_opeb['A12'] = f"Balances at {pmd.month}/{pmd.day}/{pmd.year}"
+    net_opeb['A29'] = f"Balances at {md.month}/{md.day}/{md.year}"
+    
+    summary['steps_completed'].append('Net OPEB labels updated')
+    
+    # =========================================================================
+    # SAVE
+    # =========================================================================
+    wb.save(output_file)
+    wb.close()
+    wb_data.close()
+    
+    summary['output_file'] = output_file
+    
+    return summary
+
+
+# =============================================================================
+# CONVENIENCE FUNCTION
+# =============================================================================
+
+def update_gasb75_rollforward(
+    input_file: str,
+    output_file: str,
+    new_discount_rate: float,
+    measurement_date: date,
+    covered_payroll: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Convenience function to perform a complete roll-forward update.
+    
+    Extracts prior year data, calculates roll-forward values, and updates the file.
+    
+    Args:
+        input_file: Prior year GASB 75 file
+        output_file: Output file path
+        new_discount_rate: New (EOY) discount rate
+        measurement_date: New measurement date
+        covered_payroll: New covered payroll (optional, uses prior if not provided)
+    
+    Returns:
+        Dict with summary
+    """
+    # Extract prior year data
+    prior = extract_prior_year_data(input_file)
+    
+    # Calculate roll-forward
+    calc = calculate_rollforward(
+        prior_tol_eoy=prior.tol_eoy,
+        prior_service_cost=prior.service_cost,
+        prior_discount_rate=prior.discount_rate,
         new_discount_rate=new_discount_rate
     )
     
-    print("Roll-Forward Calculation:")
-    print(f"  BOY TOL (old rate): ${calc['tol_boy_old_rate']:,.0f}")
-    print(f"  BOY TOL (new rate): ${calc['tol_boy_new_rate']:,.2f}")
-    print(f"  Service Cost: ${calc['service_cost']:,.0f}")
-    print(f"  Interest: ${calc['interest']:,.2f}")
-    print(f"  Assumption Change: ${calc['assumption_change']:,.2f}")
-    print(f"  Experience: ${calc['experience']:,.2f}")
-    print(f"  EOY TOL: ${calc['tol_eoy_baseline']:,.2f}")
+    # Determine dates
+    prior_measurement_date = date(measurement_date.year - 1, measurement_date.month, measurement_date.day)
+    valuation_date = date(measurement_date.year - 1, measurement_date.month + 1, 1) if measurement_date.month < 12 else date(measurement_date.year, 1, 1)
     
     # Create inputs
     inputs = GASB75UpdateInputs(
-        valuation_date=date(2024, 10, 1),
-        prior_measurement_date=date(2024, 9, 30),
-        measurement_date=date(2025, 9, 30),
-        prior_discount_rate=prior_discount_rate,
+        valuation_date=valuation_date,
+        prior_measurement_date=prior_measurement_date,
+        measurement_date=measurement_date,
+        prior_discount_rate=prior.discount_rate,
         new_discount_rate=new_discount_rate,
         tol_boy_old_rate=calc['tol_boy_old_rate'],
         tol_boy_new_rate=calc['tol_boy_new_rate'],
@@ -350,13 +449,42 @@ if __name__ == '__main__':
         tol_eoy_trend_plus_1=calc['tol_eoy_trend_plus_1'],
         tol_eoy_trend_minus_1=calc['tol_eoy_trend_minus_1'],
         service_cost=calc['service_cost'],
-        covered_payroll=1858084,
+        covered_payroll=covered_payroll or prior.covered_payroll,
+        active_count=prior.active_count,
+        retiree_count=prior.retiree_count,
     )
     
-    # Update the file
-    # summary = update_gasb75_file(
-    #     input_file='GASB75_2024.xlsx',
-    #     output_file='GASB75_2025.xlsx',
-    #     inputs=inputs
-    # )
-    # print(f"\nUpdate Summary: {summary}")
+    # Update file
+    summary = update_gasb75_file(input_file, output_file, inputs)
+    summary['calculation'] = calc
+    
+    return summary
+
+
+# =============================================================================
+# EXAMPLE / TEST
+# =============================================================================
+
+if __name__ == '__main__':
+    print("GASB 75 Updater Module")
+    print("=" * 50)
+    print()
+    print("This module provides:")
+    print("  - extract_prior_year_data(file) - Extract data from prior file")
+    print("  - calculate_rollforward(...) - Calculate roll-forward values")
+    print("  - update_gasb75_file(input, output, inputs) - Update file")
+    print("  - update_gasb75_rollforward(...) - Convenience roll-forward")
+    print()
+    print("Example usage:")
+    print()
+    print("  from gasb75_updater import update_gasb75_rollforward")
+    print("  from datetime import date")
+    print()
+    print("  summary = update_gasb75_rollforward(")
+    print("      input_file='GASB75_2024.xlsx',")
+    print("      output_file='GASB75_2025.xlsx',")
+    print("      new_discount_rate=0.0502,")
+    print("      measurement_date=date(2025, 9, 30)")
+    print("  )")
+    print()
+    print("See GASB75_UPDATE_INSTRUCTIONS.md for detailed documentation.")
