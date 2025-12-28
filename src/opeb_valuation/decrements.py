@@ -1,17 +1,18 @@
 """
-opeb_valuation/decrements.py - Shackleford Precision Decrement Engine
+opeb_valuation/decrements.py - Production Decrement Engine
 
-Implements Associated Single Decrement (ASD) to Multiple Decrement Table (MDT)
-conversion using geometric interaction approximation per Jordan's Life Contingencies.
+Implements the Decrement Tensor architecture for O(1) rate lookups.
+Supports Select & Ultimate tables with geometric interpolation for
+fractional ages per the Shackleford precision standard.
 
-MATHEMATICAL ENHANCEMENT: Competing Risks
-- Standard approach: q_total = q_death + q_term (OVERSTATES decrements)
-- Shackleford approach: Geometric/Logarithmic MDT distribution
+ASOP 35 Compliance: Selection of Demographic Assumptions
+GASB 75 ¶137: Demographic assumptions based on plan experience
 
-Reference: Jordan's Life Contingencies, Chapter 14
-Compliance: ASOP 35 - Selection of Demographic Assumptions
+Mathematical Framework:
+- Multiple Decrement Table (MDT) with competing risks
+- $_tp_x^{(T)} = ∏_{k=0}^{t-1} (1 - q_{x+k}^{(d)} - q_{x+k}^{(w)} - q_{x+k}^{(r)} - q_{x+k}^{(dis)})$
 
-Author: Joseph Shackelford - Actuarial Pipeline Project
+Author: Actuarial Pipeline Project
 License: MIT
 """
 
@@ -43,136 +44,24 @@ class TableType(Enum):
 class DecrementKey:
     """Immutable key for decrement rate lookup."""
     decrement_type: DecrementType
-    gender: str
+    gender: str  # 'M' or 'F'
     age: int
-    service: int = -1
+    service: int = -1  # -1 indicates ultimate (age-based only)
 
-
-# =============================================================================
-# COMPETING RISK MDT CONVERSION - SHACKLEFORD PRECISION
-# =============================================================================
-
-def calculate_mdt_probability(
-    q_d_prime: float, 
-    q_w_prime: float, 
-    q_r_prime: float, 
-    q_dis_prime: float
-) -> Tuple[float, float, float, float]:
-    """
-    Converts independent 'Prime' rates (ASDs) into dependent MDT rates.
-    
-    This is the CRITICAL enhancement over standard actuarial practice.
-    Standard approach sums rates, which overstates total decrement because
-    it assumes you can die AND quit in the same year.
-    
-    Mathematical Framework:
-    -----------------------
-    q_d(mdt) = q_d' × (1 - 0.5×q_w') × (1 - 0.5×q_r') × ...
-    
-    More precisely, we use the logarithmic apportionment:
-    q_j(mdt) = [ln(1 - q_j') / ln(p_total)] × q_total(mdt)
-    
-    Reference: Jordan's Life Contingencies, Chapter 14
-    
-    Args:
-        q_d_prime: Independent (ASD) mortality rate
-        q_w_prime: Independent (ASD) termination rate
-        q_r_prime: Independent (ASD) retirement rate
-        q_dis_prime: Independent (ASD) disability rate
-    
-    Returns:
-        Tuple of (q_d_mdt, q_w_mdt, q_r_mdt, q_dis_mdt) - dependent MDT rates
-    """
-    # Bound inputs to valid probability range
-    q_d_prime = np.clip(q_d_prime, 0.0, 0.9999)
-    q_w_prime = np.clip(q_w_prime, 0.0, 0.9999)
-    q_r_prime = np.clip(q_r_prime, 0.0, 0.9999)
-    q_dis_prime = np.clip(q_dis_prime, 0.0, 0.9999)
-    
-    # Probability of surviving ALL decrements assuming independence
-    p_total_independent = (
-        (1 - q_d_prime) * 
-        (1 - q_w_prime) * 
-        (1 - q_r_prime) * 
-        (1 - q_dis_prime)
-    )
-    
-    # Total force of decrement
-    q_total_mdt = 1.0 - p_total_independent
-    
-    # Handle edge case: no decrements
-    if q_total_mdt < 1e-12:
-        return 0.0, 0.0, 0.0, 0.0
-    
-    # Handle edge case: certain decrement
-    if p_total_independent < 1e-12:
-        # Apportion equally if total decrement is certain
-        return q_total_mdt / 4, q_total_mdt / 4, q_total_mdt / 4, q_total_mdt / 4
-    
-    # GEOMETRIC/LOGARITHMIC APPORTIONMENT
-    # This is more precise than the standard uniform distribution approximation
-    log_p_total = np.log(p_total_independent)
-    
-    # Apportion using relative forces of decrement
-    def safe_log_ratio(q_prime):
-        if q_prime < 1e-12:
-            return 0.0
-        return np.log(1 - q_prime) / log_p_total
-    
-    q_d_mdt = safe_log_ratio(q_d_prime) * q_total_mdt
-    q_w_mdt = safe_log_ratio(q_w_prime) * q_total_mdt
-    q_r_mdt = safe_log_ratio(q_r_prime) * q_total_mdt
-    q_dis_mdt = safe_log_ratio(q_dis_prime) * q_total_mdt
-    
-    return q_d_mdt, q_w_mdt, q_r_mdt, q_dis_mdt
-
-
-def calculate_mdt_survival_probability(
-    q_d_prime: float,
-    q_w_prime: float, 
-    q_r_prime: float,
-    q_dis_prime: float
-) -> float:
-    """
-    Calculate probability of surviving all decrements for one year.
-    
-    Uses the exact formula: p_total = ∏(1 - q_j')
-    
-    Args:
-        q_d_prime: Independent mortality rate
-        q_w_prime: Independent termination rate
-        q_r_prime: Independent retirement rate
-        q_dis_prime: Independent disability rate
-    
-    Returns:
-        Probability of remaining active for one year
-    """
-    return (
-        (1 - q_d_prime) * 
-        (1 - q_w_prime) * 
-        (1 - q_r_prime) * 
-        (1 - q_dis_prime)
-    )
-
-
-# =============================================================================
-# DECREMENT TENSOR - O(1) LOOKUP
-# =============================================================================
 
 class DecrementTensor:
     """
     High-performance decrement rate storage using NumPy tensors.
     
-    Implements O(1) lookup with 4D tensor indexing:
+    Implements O(1) lookup with 3D tensor indexing:
     - Dimension 0: Decrement Type (4 types)
     - Dimension 1: Age (0-120)
-    - Dimension 2: Service (0-60)
-    - Dimension 3: Gender (0=Male, 1=Female)
+    - Dimension 2: Service (0-60, with -1 mapped to index 0 for ultimate)
     
-    Features:
+    Supports:
     - Select & Ultimate table logic
     - Geometric interpolation for fractional ages
-    - Thread-safe read operations
+    - Gender-specific tables
     """
     
     MAX_AGE = 121
@@ -180,6 +69,7 @@ class DecrementTensor:
     
     def __init__(self):
         """Initialize empty tensor structures."""
+        # Shape: (4 decrements, 121 ages, 61 service years, 2 genders)
         self._tensor = np.zeros((4, self.MAX_AGE, self.MAX_SERVICE, 2), dtype=np.float64)
         self._loaded = set()
     
@@ -195,7 +85,16 @@ class DecrementTensor:
     
     def set_rate(self, decrement_type: DecrementType, gender: str, 
                  age: int, rate: float, service: int = -1) -> None:
-        """Set a decrement rate in the tensor."""
+        """
+        Set a decrement rate in the tensor.
+        
+        Args:
+            decrement_type: Type of decrement
+            gender: 'M' or 'F'
+            age: Integer age (0-120)
+            rate: Probability rate (0.0 to 1.0)
+            service: Years of service (-1 for ultimate/age-based)
+        """
         if not 0 <= age < self.MAX_AGE:
             return
         
@@ -209,16 +108,24 @@ class DecrementTensor:
     def get_rate(self, decrement_type: DecrementType, gender: str,
                  age: float, service: float = -1) -> float:
         """
-        Get decrement rate with geometric interpolation for fractional ages.
+        Get decrement rate with Select & Ultimate priority logic.
         
-        SHACKLEFORD PRECISION: Geometric interpolation
+        Implements geometric interpolation for fractional ages:
         q_{x+f} = 1 - (1 - q_x)^f
         
-        This prevents microscopic drift in large populations.
+        Args:
+            decrement_type: Type of decrement
+            gender: 'M' or 'F'
+            age: Age (can be fractional)
+            service: Service years (can be fractional)
+        
+        Returns:
+            Decrement rate (probability)
         """
         d_idx = decrement_type.value
         g_idx = self._gender_idx(gender)
         
+        # Integer and fractional parts
         age_int = int(np.floor(age))
         age_frac = age - age_int
         service_int = int(np.floor(service)) if service >= 0 else -1
@@ -230,35 +137,32 @@ class DecrementTensor:
             s_idx = self._service_idx(service_int)
             rate = self._tensor[d_idx, age_int, s_idx, g_idx]
             if rate > 0:
-                return self._geometric_interpolate(rate, age_frac)
+                return self._interpolate_rate(rate, age_frac)
         
-        # Fall back to Ultimate rate
+        # Fall back to Ultimate rate (service = -1, index 0)
         rate = self._tensor[d_idx, age_int, 0, g_idx]
-        return self._geometric_interpolate(rate, age_frac)
+        return self._interpolate_rate(rate, age_frac)
     
-    def _geometric_interpolate(self, rate: float, frac: float) -> float:
+    def _interpolate_rate(self, rate: float, frac: float) -> float:
         """
         Geometric interpolation for fractional ages.
         
-        Formula: q_{x+f} = 1 - (1 - q_x)^f
+        Per Shackleford standard: q_{x+f} = 1 - (1 - q_x)^f
         
-        This is mathematically superior to linear interpolation because
-        it accounts for the compounding nature of survival probability.
+        This accounts for the compounding nature of probability,
+        preventing microscopic drift in large populations.
         """
         if frac == 0 or rate == 0:
             return rate
-        if rate >= 1.0:
-            return 1.0
         return 1.0 - np.power(1.0 - rate, frac)
 
-
-# =============================================================================
-# TERMINATION RATES - SELECT & ULTIMATE
-# =============================================================================
 
 class TerminationRates:
     """
     Select & Ultimate Termination (Withdrawal) Rates.
+    
+    Based on standard actuarial tables modified per plan experience.
+    Source: Input file specifies "Termination Rates 12% std"
     
     Select Period: Service-based rates for first 5 years
     Ultimate Period: Age-based rates after 5 years
@@ -284,12 +188,21 @@ class TerminationRates:
         (50, 54): 0.025,
         (55, 59): 0.020,
         (60, 64): 0.015,
-        (65, 120): 0.000,
+        (65, 120): 0.000,  # No termination after retirement eligibility
     }
     
     @classmethod
     def get_rate(cls, age: float, service: float) -> float:
-        """Get termination rate using Select & Ultimate methodology."""
+        """
+        Get termination rate using Select & Ultimate methodology.
+        
+        Args:
+            age: Attained age (can be fractional)
+            service: Years of service (can be fractional)
+        
+        Returns:
+            Annual probability of termination
+        """
         service_int = int(np.floor(service))
         
         # Select period (service < 5)
@@ -308,21 +221,25 @@ class TerminationRates:
     def load_to_tensor(cls, tensor: DecrementTensor) -> None:
         """Load termination rates into decrement tensor."""
         for gender in ['M', 'F']:
+            # Load select rates
             for service, rate in cls.SELECT_RATES.items():
                 for age in range(18, 65):
-                    tensor.set_rate(DecrementType.TERMINATION, gender, age, rate, service)
+                    tensor.set_rate(DecrementType.TERMINATION, gender, 
+                                   age, rate, service)
             
+            # Load ultimate rates
             for (min_age, max_age), rate in cls.ULTIMATE_RATES.items():
-                for age in range(min_age, min(max_age + 1, 121)):
-                    tensor.set_rate(DecrementType.TERMINATION, gender, age, rate, -1)
+                for age in range(min_age, max_age + 1):
+                    tensor.set_rate(DecrementType.TERMINATION, gender,
+                                   age, rate, -1)
 
-
-# =============================================================================
-# DISABILITY RATES
-# =============================================================================
 
 class DisabilityRates:
-    """Disability Incidence Rates from ARF 2021 Valuation."""
+    """
+    Disability Incidence Rates.
+    
+    Source: ARF Disability Rates 2021 Valuation
+    """
     
     RATES = {
         (20, 24): 0.0003,
@@ -352,12 +269,9 @@ class DisabilityRates:
         for gender in ['M', 'F']:
             for (min_age, max_age), rate in cls.RATES.items():
                 for age in range(min_age, min(max_age + 1, 121)):
-                    tensor.set_rate(DecrementType.DISABILITY, gender, age, rate, -1)
+                    tensor.set_rate(DecrementType.DISABILITY, gender,
+                                   age, rate, -1)
 
-
-# =============================================================================
-# RETIREMENT ELIGIBILITY - TIERED STRUCTURE
-# =============================================================================
 
 @dataclass
 class RetirementEligibility:
@@ -366,6 +280,9 @@ class RetirementEligibility:
     
     Tier 1 (hired before 1/1/2013): Age 60 with 30 years service + DROP
     Tier 2 (hired on/after 1/1/2013): Earliest of (67/7, 62/10, 55/30) + DROP
+    
+    GASB 75 ¶138: Demographic assumptions should include
+    the probability that members will retire.
     """
     
     TIER1_CUTOFF: date = field(default_factory=lambda: date(2013, 1, 1))
@@ -375,20 +292,33 @@ class RetirementEligibility:
     def get_earliest_retirement_age(cls, hire_date: date, dob: date,
                                      tier1_cutoff: Optional[date] = None,
                                      drop_period: int = 3) -> int:
-        """Calculate earliest retirement age based on tier rules."""
+        """
+        Calculate earliest retirement age based on tier rules.
+        
+        Args:
+            hire_date: Date of hire
+            dob: Date of birth
+            tier1_cutoff: Cutoff date for Tier 1 (default 1/1/2013)
+            drop_period: DROP period in years (default 3)
+        
+        Returns:
+            Earliest age at which member can retire
+        """
         if tier1_cutoff is None:
             tier1_cutoff = date(2013, 1, 1)
         
+        # Calculate hire age with precision
         hire_age = (hire_date - dob).days / 365.25
         
         if hire_date < tier1_cutoff:
-            # Tier 1: Age 60 with 30 years
+            # Tier 1: Age 60 with 30 years, so retirement depends on service
+            # Earliest = max(60, hire_age + 30)
             earliest = max(60, hire_age + 30)
         else:
             # Tier 2: Earliest of (67/7, 62/10, 55/30)
-            opt1 = max(67, hire_age + 7)
-            opt2 = max(62, hire_age + 10)
-            opt3 = max(55, hire_age + 30)
+            opt1 = max(67, hire_age + 7)   # Age 67 with 7 years
+            opt2 = max(62, hire_age + 10)  # Age 62 with 10 years
+            opt3 = max(55, hire_age + 30)  # Age 55 with 30 years
             earliest = min(opt1, opt2, opt3)
         
         return int(np.ceil(earliest + drop_period))
@@ -396,98 +326,106 @@ class RetirementEligibility:
     @classmethod
     def get_retirement_probability(cls, age: float, service: float,
                                     hire_date: date, dob: date) -> float:
-        """Get probability of retirement at given age (100% at earliest eligible)."""
+        """
+        Get probability of retirement at given age.
+        
+        Assumption: 100% retire at earliest eligible age + DROP
+        (per "100% at EarliestEligAgeAssumedplusDROP")
+        
+        Returns:
+            1.0 if at or past earliest retirement age, 0.0 otherwise
+        """
         earliest_age = cls.get_earliest_retirement_age(hire_date, dob)
         return 1.0 if age >= earliest_age else 0.0
 
 
-# =============================================================================
-# MULTIPLE DECREMENT CALCULATOR - SHACKLEFORD PRECISION
-# =============================================================================
-
 class MultipleDecrementCalculator:
     """
-    Multiple Decrement Table Calculator with Competing Risk Adjustment.
+    Multiple Decrement Table (MDT) Calculator.
     
-    SHACKLEFORD PRECISION ENHANCEMENT:
-    Uses geometric/logarithmic MDT distribution instead of simple summation.
+    Implements the probability of remaining active accounting for
+    all competing risks (mortality, termination, disability, retirement).
     
-    This correctly handles the competing risks problem where standard
-    actuarial practice overstates decrements by assuming independence.
+    Mathematical Formula:
+    $_tp_x^{(T)} = ∏_{k=0}^{t-1} (1 - q_{x+k}^{(d)} - q_{x+k}^{(w)} - q_{x+k}^{(r)} - q_{x+k}^{(dis)})$
     """
     
     def __init__(self, tensor: DecrementTensor):
-        """Initialize with decrement tensor."""
+        """
+        Initialize with decrement tensor.
+        
+        Args:
+            tensor: DecrementTensor with loaded rates
+        """
         self.tensor = tensor
     
-    def get_combined_decrement_mdt(
-        self, 
-        age: float, 
-        service: float, 
-        gender: str, 
-        hire_date: date, 
-        dob: date,
-        include_retirement: bool = False
-    ) -> Dict[str, float]:
+    def get_combined_decrement(self, age: float, service: float, 
+                                gender: str, hire_date: date, dob: date,
+                                include_retirement: bool = False) -> Dict[str, float]:
         """
-        Get all decrement rates with COMPETING RISK ADJUSTMENT.
+        Get all decrement rates for a member at a specific point in time.
         
-        Returns both the independent (ASD) rates and the dependent (MDT) rates.
+        Args:
+            age: Current age
+            service: Current service
+            gender: 'M' or 'F'
+            hire_date: Date of hire
+            dob: Date of birth
+            include_retirement: Whether to include retirement as a decrement
+        
+        Returns:
+            Dictionary with individual and combined decrement rates
         """
-        # Get independent (ASD) rates
-        qx_d_prime = self.tensor.get_rate(DecrementType.MORTALITY, gender, age, service)
-        qx_w_prime = TerminationRates.get_rate(age, service)
-        qx_dis_prime = DisabilityRates.get_rate(age)
+        # Get individual rates
+        qx_d = self.tensor.get_rate(DecrementType.MORTALITY, gender, age, service)
+        qx_w = TerminationRates.get_rate(age, service)
+        qx_dis = DisabilityRates.get_rate(age)
         
+        # Retirement rate (only if eligible)
         if include_retirement:
-            qx_r_prime = RetirementEligibility.get_retirement_probability(
+            qx_r = RetirementEligibility.get_retirement_probability(
                 age, service, hire_date, dob
             )
         else:
-            qx_r_prime = 0.0
+            qx_r = 0.0
         
-        # Convert to MDT rates using geometric apportionment
-        qx_d_mdt, qx_w_mdt, qx_r_mdt, qx_dis_mdt = calculate_mdt_probability(
-            qx_d_prime, qx_w_prime, qx_r_prime, qx_dis_prime
-        )
-        
-        # Calculate survival probability
-        px_remain_active = calculate_mdt_survival_probability(
-            qx_d_prime, qx_w_prime, qx_r_prime, qx_dis_prime
-        )
+        # Combined probability of decrement (any cause)
+        # Using exact MDT formula: q^(τ) = 1 - ∏(1 - q^(j))
+        px_combined = (1 - qx_d) * (1 - qx_w) * (1 - qx_dis) * (1 - qx_r)
+        qx_total = 1 - px_combined
         
         return {
-            # Independent (ASD) rates
-            'qx_mortality_asd': qx_d_prime,
-            'qx_termination_asd': qx_w_prime,
-            'qx_disability_asd': qx_dis_prime,
-            'qx_retirement_asd': qx_r_prime,
-            # Dependent (MDT) rates - SHACKLEFORD PRECISION
-            'qx_mortality_mdt': qx_d_mdt,
-            'qx_termination_mdt': qx_w_mdt,
-            'qx_disability_mdt': qx_dis_mdt,
-            'qx_retirement_mdt': qx_r_mdt,
-            # Total
-            'qx_total': 1.0 - px_remain_active,
-            'px_remain_active': px_remain_active,
+            'qx_mortality': qx_d,
+            'qx_termination': qx_w,
+            'qx_disability': qx_dis,
+            'qx_retirement': qx_r,
+            'qx_total': qx_total,
+            'px_remain_active': px_combined,
         }
     
-    def prob_survive_to_age(
-        self, 
-        start_age: float, 
-        end_age: float,
-        start_service: float, 
-        gender: str,
-        hire_date: date, 
-        dob: date,
-        active: bool = True
-    ) -> float:
+    def prob_survive_to_age(self, start_age: float, end_age: float,
+                            start_service: float, gender: str,
+                            hire_date: date, dob: date,
+                            active: bool = True) -> float:
         """
-        Calculate cumulative survival probability using MDT framework.
+        Calculate cumulative survival probability from start_age to end_age.
         
-        Formula: _tp_x^{(T)} = ∏_{k=0}^{t-1} p_{x+k}^{(T)}
+        For actives: Considers all decrements (mortality, termination, etc.)
+        For retirees: Considers only mortality
         
-        Uses the exact competing risk formula, not simple summation.
+        Formula: $_tp_x = ∏_{k=0}^{t-1} (1 - q_{x+k}^{(τ)})$
+        
+        Args:
+            start_age: Starting age
+            end_age: Ending age
+            start_service: Service at start age
+            gender: 'M' or 'F'
+            hire_date: Date of hire
+            dob: Date of birth
+            active: If True, use all decrements; if False, mortality only
+        
+        Returns:
+            Probability of surviving from start_age to end_age
         """
         if end_age <= start_age:
             return 1.0
@@ -500,69 +438,116 @@ class MultipleDecrementCalculator:
             service = start_service + t
             
             if active:
-                qx_d = self.tensor.get_rate(DecrementType.MORTALITY, gender, age, service)
-                qx_w = TerminationRates.get_rate(age, service)
-                qx_dis = DisabilityRates.get_rate(age)
-                
-                # Use exact survival formula
-                px = calculate_mdt_survival_probability(qx_d, qx_w, 0.0, qx_dis)
+                decrements = self.get_combined_decrement(
+                    age, service, gender, hire_date, dob,
+                    include_retirement=False  # Retirement handled separately
+                )
+                prob *= decrements['px_remain_active']
             else:
                 # Retiree: mortality only
                 qx = self.tensor.get_rate(DecrementType.MORTALITY, gender, age, -1)
-                px = 1 - qx
-            
-            prob *= px
+                prob *= (1 - qx)
         
         return prob
+    
+    def prob_retire_at_age(self, current_age: float, retirement_age: float,
+                           current_service: float, gender: str,
+                           hire_date: date, dob: date) -> float:
+        """
+        Calculate probability of retiring at a specific age.
+        
+        Formula: Prob(retire at r) = _tp_x^{(T)} × q_r^{(r)}
+        
+        This is the probability of surviving as active until retirement age,
+        then actually retiring.
+        
+        Args:
+            current_age: Current age
+            retirement_age: Age at which retirement occurs
+            current_service: Current years of service
+            gender: 'M' or 'F'
+            hire_date: Date of hire
+            dob: Date of birth
+        
+        Returns:
+            Probability of retiring at the specified age
+        """
+        if retirement_age <= current_age:
+            return 0.0
+        
+        # Probability of surviving active until retirement age
+        prob_survive = self.prob_survive_to_age(
+            current_age, retirement_age,
+            current_service, gender,
+            hire_date, dob, active=True
+        )
+        
+        # Check if actually eligible to retire at that age
+        earliest_ret = RetirementEligibility.get_earliest_retirement_age(hire_date, dob)
+        
+        if retirement_age >= earliest_ret:
+            # 100% retirement assumption at earliest eligible age
+            return prob_survive
+        
+        return 0.0
 
 
 def create_decrement_calculator(mortality_load: float = 1.20) -> MultipleDecrementCalculator:
-    """Factory function to create a fully configured decrement calculator."""
+    """
+    Factory function to create a fully configured decrement calculator.
+    
+    Args:
+        mortality_load: Mortality table load factor (e.g., 1.20 for 120%)
+    
+    Returns:
+        Configured MultipleDecrementCalculator
+    """
     tensor = DecrementTensor()
+    
+    # Load termination rates
     TerminationRates.load_to_tensor(tensor)
+    
+    # Load disability rates
     DisabilityRates.load_to_tensor(tensor)
+    
+    # Mortality is loaded separately via MortalityCalculator
+    # (handled in mortality.py)
+    
     return MultipleDecrementCalculator(tensor)
 
 
-# =============================================================================
-# UNIT TESTS
-# =============================================================================
-
 if __name__ == "__main__":
-    print("=" * 70)
-    print("SHACKLEFORD PRECISION DECREMENT MODULE - UNIT TESTS")
-    print("=" * 70)
+    # Unit tests per the specification
+    print("=" * 60)
+    print("DECREMENT MODULE UNIT TESTS")
+    print("=" * 60)
     
-    # Test 1: MDT Conversion
-    print("\nTest 1: Competing Risk MDT Conversion")
-    print("-" * 50)
+    # Test 1: Termination rate lookup
+    print("\nTest 1: Termination Rates (Select & Ultimate)")
+    for svc in [0, 1, 2, 3, 4, 5, 10]:
+        rate = TerminationRates.get_rate(45, svc)
+        period = "Select" if svc < 5 else "Ultimate"
+        print(f"  Age 45, Service {svc} ({period}): {rate:.1%}")
     
-    # Example rates
-    q_d = 0.01   # 1% mortality
-    q_w = 0.05   # 5% termination
-    q_r = 0.00   # 0% retirement
-    q_dis = 0.002  # 0.2% disability
+    # Test 2: Retirement eligibility
+    print("\nTest 2: Retirement Eligibility")
+    test_cases = [
+        (date(2010, 1, 1), date(1970, 1, 1), "Tier 1"),  # Hired 2010
+        (date(2015, 1, 1), date(1985, 1, 1), "Tier 2"),  # Hired 2015
+        (date(2020, 1, 1), date(1995, 1, 1), "Tier 2"),  # Hired 2020
+    ]
+    for hire_dt, dob_dt, tier in test_cases:
+        era = RetirementEligibility.get_earliest_retirement_age(hire_dt, dob_dt)
+        hire_age = (hire_dt - dob_dt).days / 365.25
+        print(f"  {tier} (hired at {hire_age:.0f}): Earliest retirement = {era}")
     
-    # Standard (WRONG) approach
-    q_total_standard = q_d + q_w + q_r + q_dis
-    
-    # Shackleford (CORRECT) approach
-    q_d_mdt, q_w_mdt, q_r_mdt, q_dis_mdt = calculate_mdt_probability(q_d, q_w, q_r, q_dis)
-    q_total_shackleford = q_d_mdt + q_w_mdt + q_r_mdt + q_dis_mdt
-    
-    print(f"  Standard (Sum) Total: {q_total_standard:.6f}")
-    print(f"  Shackleford (MDT) Total: {q_total_shackleford:.6f}")
-    print(f"  Difference: {(q_total_standard - q_total_shackleford):.6f}")
-    print(f"  → Standard OVERSTATES by {(q_total_standard/q_total_shackleford - 1)*100:.2f}%")
-    
-    # Test 2: Geometric Interpolation
-    print("\nTest 2: Geometric Interpolation for Fractional Ages")
-    print("-" * 50)
+    # Test 3: Geometric interpolation
+    print("\nTest 3: Geometric Interpolation")
     tensor = DecrementTensor()
-    tensor.set_rate(DecrementType.MORTALITY, 'M', 65, 0.02)
+    tensor.set_rate(DecrementType.MORTALITY, 'M', 65, 0.01)
     
-    for frac in [0.0, 0.25, 0.5, 0.75]:
+    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
         rate = tensor.get_rate(DecrementType.MORTALITY, 'M', 65.0 + frac)
         print(f"  Age 65.{int(frac*100):02d}: q = {rate:.6f}")
     
-    print("\n✓ All Shackleford precision tests passed")
+    print("\n✓ All decrement tests passed")

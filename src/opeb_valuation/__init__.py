@@ -1,38 +1,25 @@
 """
-OPEB Full Valuation Engine - Shackleford Precision Edition
+OPEB Full Valuation Engine
 
-Production-ready GASB 75 OPEB valuation engine with scientific precision:
+Production-ready GASB 75 OPEB valuation engine implementing Entry Age Normal
+actuarial cost method with comprehensive per-member liability calculations.
 
-MATHEMATICAL ENHANCEMENTS:
-1. Competing Risks: Geometric/logarithmic MDT distribution (not simple summation)
-2. Mid-Year Timing: v^{t+0.5} discounting and √(1+trend) adjustment
-3. Level % of Pay: True EAN attribution with backward salary projection
-4. Joint-Life: Conditional probability vectors for spousal benefits
-
-ENTERPRISE FEATURES:
-1. ASOP 23 Imputation: Actuarially defensible defaults for missing data
-2. SHA-256 Audit Trail: Cryptographic file hashing for reproducibility
-3. PII Anonymization: HIPAA-compliant data handling
-4. Quality Reporting: Complete data quality documentation
+Version: 2.1.0 (West Florida Planning Corrections - 2025-12-28)
 
 Compliance:
 - GASB Statement No. 75 and Implementation Guide No. 2017-3
 - ASOP 4: Measuring Pension Obligations
 - ASOP 6: Measuring Retiree Group Benefits Obligations
-- ASOP 23: Data Quality
 - ASOP 25: Credibility Procedures
 - ASOP 35: Selection of Demographic Assumptions
 
-Author: Joseph Shackelford - Actuarial Pipeline Project
+Author: Actuarial Pipeline Project
 License: MIT
-Version: 3.0.0 (Shackleford Precision)
 """
 
-__version__ = "5.0.0"
-__author__ = "Joseph Shackelford"
-__precision__ = "Shackleford"
+__version__ = "2.1.0"
+__author__ = "Actuarial Pipeline Project"
 
-# Core Engine
 from .engine import (
     ValuationEngine,
     CensusRecord,
@@ -42,14 +29,12 @@ from .engine import (
     create_engine
 )
 
-# Mortality
 from .mortality import (
     MortalityCalculator,
     create_mortality_calculator,
     MortalityTable
 )
 
-# Decrements with Competing Risk MDT
 from .decrements import (
     DecrementTensor,
     DecrementType,
@@ -57,123 +42,32 @@ from .decrements import (
     TerminationRates,
     DisabilityRates,
     RetirementEligibility,
-    create_decrement_calculator,
-    calculate_mdt_probability,
-    calculate_mdt_survival_probability
+    create_decrement_calculator
 )
 
-# Financial Engine with Mid-Year Precision
 from .financials import (
     FinancialEngine,
     TrendModel,
     MorbidityModel,
-    SalaryProjector,
     create_financial_engine
 )
 
-# Enterprise Data Ingestion
-from .ingestion import (
-    CensusLoader,
-    CensusResult,
-    ImputationEngine,
-    PIIAnonymizer,
-    DataQualityReportGenerator,
-    load_census
-)
-
-# Vectorized Engine (100K+ lives performance)
-from .vectorized_engine import (
-    VectorizedValuationEngine,
-    VectorizedValuationConfig,
-    VectorizedMortalityTensor,
-    VectorizedDecrementEngine,
-    VectorizedFinancialEngine,
-    create_vectorized_engine
-)
-
-# Legacy Import (ProVal .SF Parser)
-from .legacy_import import (
-    ProValParser,
-    ProValParseResult,
-    ParsedTable,
-    ParsedBenefit,
-    BenefitFactory,
-    LegacyTableConverter,
-    parse_proval_file,
-    parse_proval_text,
-    compile_benefit_formula
-)
-
-# Dynamic Plan Configuration (Strategy Pattern)
-from .plan_config import (
-    PlanDocument,
-    PlanRules,
-    PlanFactory,
-    ImplicitSubsidyPlan,
-    ExplicitSubsidyPlan,
-    ServiceTieredPlan,
-    CoverageType,
-    BenefitType,
-    ContributionStructure,
-    PremiumSchedule,
-    ContributionTier
-)
-
-# Smart Ingestion (Client Chaos Handler)
-from .smart_ingestion import (
-    SmartCensusLoader,
-    FuzzyColumnMatcher,
-    SmartDateParser,
-    StatusUnifier,
-    DataQualityReport,
-    DataQualityIssue,
-    MemberStatus,
-    smart_load_census
-)
-
-# Universal Table Library
-from .library import (
-    TableRepository,
-    TableLookup,
-    TableCategory,
-    TableMetadata,
-    get_table_lookup,
-    list_available_tables,
-    get_proval_mapping
-)
-
-# Legacy ProVal Parser
-from .legacy import (
-    LegacyParser,
-    BenefitExpressionCompiler,
-    CompiledBenefit,
-    ParsedAssumption,
-    ProValParseResult,
-    EngineInjector,
-    MemberContext,
-    parse_proval_file,
-    parse_proval_text,
-    inject_proval_config
-)
-
-# GASB 75 Reporting
-from .reporting import (
-    ExcelReportGenerator,
-    ValuationResults,
-    SensitivityResult,
-    SensitivityAnalyzer,
-    AmortizationScheduleGenerator,
-    CellMapping,
-    generate_gasb75_report,
-    run_sensitivity_and_report
+from .excel_updater import (
+    # Main functions
+    update_full_valuation_excel,
+    verify_valuation_output,
+    print_valuation_summary,
+    
+    # Data classes
+    FullValuationInputs,
+    FullValuationResults,
+    
+    # Helper functions
+    copy_cell_format,
+    adjust_formula_row,
 )
 
 __all__ = [
-    # Version info
-    "__version__",
-    "__author__",
-    "__precision__",
-    
     # Main engine
     "ValuationEngine",
     "create_engine",
@@ -191,7 +85,7 @@ __all__ = [
     "create_mortality_calculator",
     "MortalityTable",
     
-    # Decrements (Shackleford MDT)
+    # Decrements
     "DecrementTensor",
     "DecrementType",
     "MultipleDecrementCalculator",
@@ -199,112 +93,19 @@ __all__ = [
     "DisabilityRates",
     "RetirementEligibility",
     "create_decrement_calculator",
-    "calculate_mdt_probability",
-    "calculate_mdt_survival_probability",
     
-    # Financials (Mid-Year Precision)
+    # Financials
     "FinancialEngine",
     "TrendModel",
     "MorbidityModel",
-    "SalaryProjector",
     "create_financial_engine",
     
-    # Enterprise Ingestion
-    "CensusLoader",
-    "CensusResult",
-    "ImputationEngine",
-    "PIIAnonymizer",
-    "DataQualityReportGenerator",
-    "load_census",
-]
-
-
-def info():
-    """Print package information."""
-    print(f"""
-╔══════════════════════════════════════════════════════════════════════╗
-║         OPEB Full Valuation Engine - Shackleford Precision           ║
-╠══════════════════════════════════════════════════════════════════════╣
-║  Version: {__version__}                                                      ║
-║  Author:  {__author__}                                       ║
-║  License: MIT                                                        ║
-╠══════════════════════════════════════════════════════════════════════╣
-║  MATHEMATICAL ENHANCEMENTS:                                          ║
-║  ✓ Competing Risk MDT (geometric/logarithmic distribution)           ║
-║  ✓ Mid-Year Discounting (v^{{t+0.5}})                                  ║
-║  ✓ Mid-Year Trending (√(1+trend) adjustment)                         ║
-║  ✓ Level % of Pay EAN (backward salary projection)                   ║
-║  ✓ Joint-Life Spouse Benefits (conditional probability vectors)      ║
-╠══════════════════════════════════════════════════════════════════════╣
-║  ENTERPRISE FEATURES:                                                ║
-║  ✓ ASOP 23 Data Imputation                                           ║
-║  ✓ SHA-256 Audit Trail                                               ║
-║  ✓ PII Anonymization                                                 ║
-║  ✓ Quality Reporting                                                 ║
-╚══════════════════════════════════════════════════════════════════════╝
-""")
-
-__all__ = [
-    # Version info
-    "__version__",
-    "__author__",
-    "__precision__",
-    
-    # Main engines
-    "ValuationEngine",
-    "create_engine",
-    "VectorizedValuationEngine",
-    "create_vectorized_engine",
-    
-    # Census and results
-    "CensusRecord",
-    "MemberResult",
-    
-    # Sub-valuators
-    "RetireeValuator",
-    "ActiveValuator",
-    
-    # Mortality
-    "MortalityCalculator",
-    "create_mortality_calculator",
-    "MortalityTable",
-    
-    # Decrements (Shackleford MDT)
-    "DecrementTensor",
-    "DecrementType",
-    "MultipleDecrementCalculator",
-    "calculate_mdt_probability",
-    "calculate_mdt_survival_probability",
-    
-    # Financials (Mid-Year Precision)
-    "FinancialEngine",
-    "TrendModel",
-    "MorbidityModel",
-    "SalaryProjector",
-    
-    # Enterprise Ingestion
-    "CensusLoader",
-    "CensusResult",
-    "load_census",
-    
-    # Smart Ingestion (Client Chaos)
-    "SmartCensusLoader",
-    "FuzzyColumnMatcher",
-    "SmartDateParser",
-    "StatusUnifier",
-    "smart_load_census",
-    "DataQualityReport",
-    
-    # Legacy Import (ProVal)
-    "ProValParser",
-    "BenefitFactory",
-    "parse_proval_file",
-    "compile_benefit_formula",
-    
-    # Dynamic Plan Configuration
-    "PlanDocument",
-    "PlanRules",
-    "PlanFactory",
-    "ImplicitSubsidyPlan",
-    "CoverageType",
+    # Excel Updater (NEW)
+    "update_full_valuation_excel",
+    "verify_valuation_output",
+    "print_valuation_summary",
+    "FullValuationInputs",
+    "FullValuationResults",
+    "copy_cell_format",
+    "adjust_formula_row",
 ]
